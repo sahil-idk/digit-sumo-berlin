@@ -4,14 +4,14 @@ import pandas as pd
 import numpy as np
 import os
 from sklearn.preprocessing import MinMaxScaler
-import joblib  # For saving/loading the scaler
+import torch  # For saving/loading the scaler
 
 # Get the base directory
 base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Construct absolute paths
-model_path = os.path.join(base_dir, 'models', 'lstm', 'lstm_model.pth')
-scaler_path = os.path.join(base_dir, 'models', 'lstm', 'lstm_scaler.joblib')  # Changed extension
+model_path = os.path.join("C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/models/lstm/lstm_model.pth")
+scaler_path = os.path.join("C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/models/lstm/lstm_scaler.pth")  # Changed extension
 
 print(f"Looking for model at: {model_path}")
 print(f"Looking for scaler at: {scaler_path}")
@@ -21,7 +21,7 @@ os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
 # Load or create the scaler
 try:
-    scaler = joblib.load(scaler_path)  # Use joblib to load
+    scaler = torch.load(scaler_path, weights_only=False)  # Use joblib to load
     print("Scaler loaded successfully")
 except FileNotFoundError:
     print(f"Scaler file not found at {scaler_path}")
@@ -30,7 +30,7 @@ except FileNotFoundError:
     # Fit the scaler with some dummy data
     dummy_data = np.random.rand(100, 1) * 100  # Random values between 0 and 100
     scaler.fit(dummy_data)
-    joblib.dump(scaler, scaler_path)  # Use joblib to save
+    torch.dump(scaler, scaler_path)  # Use joblib to save
     print("New scaler created and saved")
 
 # Define the LSTM model

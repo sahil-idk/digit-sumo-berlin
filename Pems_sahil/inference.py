@@ -2,24 +2,23 @@ import os
 import pandas as pd
 import numpy as np
 from predict.lstm_predict import predict as lstm_predict
-from predict.gcn_lstm_predict import predict as gcn_lstm_predict
-from predict.linear_predict import predict as linear_predict
-from predict.Digut import predict as digit_predict
 from sklearn.preprocessing import MinMaxScaler
 import time
 import torch
 
 
+
 global_start_time = time.time()
 # Define input data paths
-input_folder_402214 = 'Data/402214'
-input_folder_402510 = 'Data/402510'
-input_folder_402835 = 'Data/402835'
-input_folder_414025 = 'Data/414025'
+input_folder_402214 = 'C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/Data/402214'
+input_folder_402510 = 'C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/Data/402510'
+input_folder_402835 = 'C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/Data/402835'
+input_folder_414025 = 'C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/Data/414025'
 
 # Load the saved scaler
-scaler_path = './models/linear/scaler.pth'
-scaler = torch.load(scaler_path)
+scaler_path = 'C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/models/lstm/lstm_scaler.pth'
+scaler = torch.load(scaler_path, weights_only=False)
+
 
 # Define result path
 result_path = 'Results'
@@ -93,13 +92,11 @@ def process_and_predict(folder_paths, window_size=10):
         # Iterate over data using a sliding window
         for i in range(num_timesteps - window_size + 1):
             # Load the model type from the model.csv for each window
-            model = safe_read_csv('csv_files/model.csv')
+            model = safe_read_csv('C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/csv_files/model.csv')
             model_type = model.iloc[0, 0]
 
             # Choose the right data and prediction function based on the model type
-            if model_type == 'gcn_lstm' or model_type == 'digit':
-                data = gcn_lstm_data
-            elif model_type == 'linear' or model_type == 'lstm':
+            if model_type == 'lstm':
                 data = lstm_data
             else:
                 print("Invalid model")
@@ -143,7 +140,7 @@ def process_and_predict(folder_paths, window_size=10):
                 })
 
                 print(f"Timestamp: {timestamp}, Model: {model_type}, Predicted: {prediction_5th}, Actual: {actual_vehicle_count}")
-                pd.DataFrame([results[-1]]).to_csv('Knowledge/prediction_results.csv', index=False, mode='a', header=False)
+                pd.DataFrame([results[-1]]).to_csv('C:/Users/sahil/Sumo/2024-10-20-18-27-19/Pems_sahil/Knowledge/prediction_results.csv', index=False, mode='a', header=False)
 
             time.sleep(1)  # Simulating some processing delay
 
