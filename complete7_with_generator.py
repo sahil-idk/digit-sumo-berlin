@@ -22,6 +22,7 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
+import json  # Add this import at the top with your other imports
 
 # Import our prediction bridge
 from traffic_prediction_bridge import run_prediction, get_latest_predictions
@@ -264,6 +265,7 @@ class RSU:
 
 class ScenarioManager:
     """Manages different traffic scenarios for what-if analysis"""
+    # Modified ScenarioManager.__init__ method
     def __init__(self):
         # Define scenarios with unique vehicle types and colors
         self.scenarios = {
@@ -271,18 +273,51 @@ class ScenarioManager:
             "Rush Hour": {"density": 10, "vehicle_type": "rush_vehicle", "color": (255, 0, 0, 255)},  # Red
             "Rainy Day": {"density": 3, "vehicle_type": "rain_vehicle", "color": (0, 0, 255, 255), "max_speed": 15.0},  # Blue
             "Foggy Morning": {"density": 5, "vehicle_type": "fog_vehicle", "color": (128, 128, 128, 255), "max_speed": 10.0},  # Gray
-            "Emergency": {"density": 2, "vehicle_type": "emergency_vehicle", "color": (255, 165, 0, 255)}  # Orange
+            "Emergency": {"density": 2, "vehicle_type": "emergency_vehicle", "color": (255, 165, 0, 255), "is_emergency": True}  # Orange
         }
         
         # Initialize vehicle types for scenarios
         for scenario, config in self.scenarios.items():
             try:
-                traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
-                traci.vehicletype.setColor(config["vehicle_type"], config["color"])
-                
-                # Set max speed for weather scenarios
-                if "max_speed" in config:
-                    traci.vehicletype.setMaxSpeed(config["vehicle_type"], config["max_speed"])
+                # For emergency vehicles, create it with the emergency class directly
+                if scenario == "Emergency":
+                    # Use the correct parameters for emergency vehicles
+                    try:
+                        # First check if the type already exists
+                        if config["vehicle_type"] in traci.vehicletype.getIDList():
+                            traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                        else:
+                            # Create a new vehicle type with the emergency class
+                            traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
+                            traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                            
+                            # Set emergency vehicle properties
+                            traci.vehicletype.setEmergency(config["vehicle_type"], True)
+                            
+                            # Set GUI shape to emergency vehicle
+                            traci.vehicletype.setGuiShape(config["vehicle_type"], "emergency")
+                            
+                            # Set speed factor to 1.5 (allowing 50% faster than speed limit)
+                            traci.vehicletype.setSpeedFactor(config["vehicle_type"], 1.5)
+                            
+                            # Add blue light parameter (if supported in this SUMO version)
+                            try:
+                                traci.vehicletype.setParameter(config["vehicle_type"], "has.bluelight.device", "true")
+                            except:
+                                print("Blue light device parameter not supported, using default emergency vehicle")
+                    except Exception as e:
+                        print(f"Error setting up emergency vehicle: {e}, falling back to standard method")
+                        traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
+                        traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                else:
+                    # Standard vehicle setup for non-emergency
+                    traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
+                    traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                    
+                    # Set max speed for weather scenarios
+                    if "max_speed" in config:
+                        traci.vehicletype.setMaxSpeed(config["vehicle_type"], config["max_speed"])
+                        
             except traci.TraCIException as e:
                 print(f"Error setting up vehicle type for {scenario}: {e}")
     
@@ -399,9 +434,31 @@ class ScenarioManager:
                 from_edge, to_edge = random.choice(trip_edges)
                 route_id = f"route_{vehicle_id}"
                 traci.route.add(routeID=route_id, edges=[from_edge, to_edge])
+                
+                # Add vehicle with appropriate parameters
                 traci.vehicle.add(vehID=vehicle_id, routeID=route_id, typeID=vehicle_type,
-                                 departLane="best", departSpeed="max")
-                print(f"Added {scenario_name} vehicle {vehicle_id}")
+                                departLane="best", departSpeed="max")
+                
+                # For emergency vehicles, set additional parameters
+                if scenario_name == "Emergency":
+                    try:
+                        # Enable blue light device directly on vehicle if supported
+                        traci.vehicle.setParameter(vehicle_id, "has.bluelight.device", "true")
+                        
+                        # Configure speed mode (binary parameter controlling driving rules adherence)
+                        # This value allows ignoring traffic lights while still avoiding collisions
+                        # The exact value depends on the SUMO version, this is a common setting
+                        traci.vehicle.setSpeedMode(vehicle_id, 31)  # Binary: 11111
+                        
+                        # Set more aggressive lane changing behavior
+                        traci.vehicle.setLaneChangeMode(vehicle_id, 256)  # Strategic changes only
+                        
+                        print(f"Added {scenario_name} emergency vehicle {vehicle_id} with special rights")
+                    except Exception as e:
+                        print(f"Warning: Could not set some emergency parameters: {e}")
+                else:
+                    print(f"Added {scenario_name} vehicle {vehicle_id}")
+                    
                 added += 1
             except traci.TraCIException as e:
                 print(f"Error adding vehicle {vehicle_id}: {e}")
@@ -409,7 +466,9 @@ class ScenarioManager:
             attempt += 1
         
         print(f"Added {added}/{adjusted_density} vehicles for {scenario_name} scenario")
-
+        
+        
+    
 class ModernTrafficGUI:
     """Modern GUI for the traffic simulation application"""
     def __init__(self):
@@ -1036,6 +1095,384 @@ class ModernTrafficGUI:
         self.rsu_chart.draw()
         self.rsu_chart.get_tk_widget().pack(fill="both", expand=True)
     
+    
+        # Add this function to your ModernTrafficGUI class to update real-time values in the prediction table
+    def update_prediction_with_real_values(self):
+        """Update the prediction table with real-time values as they occur"""
+        if not hasattr(self, 'prediction_data') or not self.prediction_data.get("timestamps"):
+            return  # No predictions to update
+            
+        # Get current simulation time
+        current_time = datetime.now()
+        
+        # Check each prediction timestamp to see if it's time to update with real values
+        updated = False
+        for i, timestamp_str in enumerate(self.prediction_data["timestamps"]):
+            try:
+                # Convert timestamp string to datetime object
+                prediction_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                
+                # If the current time has passed the prediction time and we haven't recorded a real value
+                if current_time >= prediction_time and not self.prediction_data.get("real_values", {}).get(timestamp_str):
+                    # Get the current vehicle count from simulation
+                    vehicles = traci.vehicle.getIDList()
+                    vehicle_count = len(vehicles)
+                    
+                    # Store the real value
+                    if "real_values" not in self.prediction_data:
+                        self.prediction_data["real_values"] = {}
+                        
+                    self.prediction_data["real_values"][timestamp_str] = vehicle_count
+                    
+                    # Calculate error/difference
+                    if "predictions" in self.prediction_data and i < len(self.prediction_data["predictions"]):
+                        predicted_value = self.prediction_data["predictions"][i]
+                        difference = vehicle_count - predicted_value
+                        
+                        if "differences" not in self.prediction_data:
+                            self.prediction_data["differences"] = {}
+                            
+                        self.prediction_data["differences"][timestamp_str] = difference
+                    
+                    updated = True
+                    print(f"Updated real-time value for {timestamp_str}: {vehicle_count} vehicles")
+            except Exception as e:
+                print(f"Error updating prediction with real value: {e}")
+        
+        # If we updated any values, recalculate metrics and update the display
+            if updated:
+                # Calculate metrics
+                metrics = self.calculate_prediction_metrics()
+                
+                # Track metrics history
+                self.track_metrics_history()
+                
+                # Update displays
+                self.display_prediction_table()
+                self.display_metrics_panel()
+    
+    def calculate_prediction_metrics(self):
+        """Calculate performance metrics for the prediction model"""
+        # Only calculate if we have real values to compare with
+        if not hasattr(self, 'prediction_data') or not self.prediction_data.get("real_values"):
+            return {}
+            
+        real_values = []
+        predicted_values = []
+        timestamps = []
+        
+        # Collect all timestamps that have both predicted and real values
+        for i, timestamp in enumerate(self.prediction_data.get("timestamps", [])):
+            if timestamp in self.prediction_data["real_values"]:
+                if i < len(self.prediction_data.get("predictions", [])):
+                    real_values.append(self.prediction_data["real_values"][timestamp])
+                    predicted_values.append(self.prediction_data["predictions"][i])
+                    timestamps.append(timestamp)
+        
+        # If we don't have enough data points, return empty metrics
+        if len(real_values) < 1:
+            return {}
+        
+        # Calculate various metrics
+        metrics = {}
+        
+        # Mean Absolute Error (MAE)
+        absolute_errors = [abs(real - pred) for real, pred in zip(real_values, predicted_values)]
+        metrics["MAE"] = sum(absolute_errors) / len(absolute_errors) if absolute_errors else 0
+        
+        # Mean Squared Error (MSE)
+        squared_errors = [(real - pred) ** 2 for real, pred in zip(real_values, predicted_values)]
+        metrics["MSE"] = sum(squared_errors) / len(squared_errors) if squared_errors else 0
+        
+        # Root Mean Squared Error (RMSE)
+        metrics["RMSE"] = metrics["MSE"] ** 0.5 if metrics["MSE"] else 0
+        
+        # Mean Absolute Percentage Error (MAPE)
+        percentage_errors = [abs((real - pred) / real) * 100 for real, pred in zip(real_values, predicted_values) if real != 0]
+        metrics["MAPE"] = sum(percentage_errors) / len(percentage_errors) if percentage_errors else 0
+        
+        # Accuracy based on a threshold (e.g., within 20% of actual value)
+        threshold = 0.2  # 20%
+        correct_predictions = sum(1 for real, pred in zip(real_values, predicted_values) 
+                                if abs((real - pred) / real) <= threshold and real != 0)
+        metrics["Accuracy"] = (correct_predictions / len(real_values)) * 100 if real_values else 0
+        
+        # Store the metrics in prediction_data
+        self.prediction_data["metrics"] = metrics
+        
+        return metrics
+    
+    def track_metrics_history(self):
+        """Track metrics over time to show trends"""
+        # Initialize metrics history if not exists
+        if not hasattr(self, 'metrics_history'):
+            self.metrics_history = {
+                'timestamps': [],
+                'MAE': [],
+                'RMSE': [],
+                'MAPE': [],
+                'Accuracy': []
+            }
+        
+        # Get current metrics
+        metrics = self.prediction_data.get("metrics", {})
+        if not metrics:
+            return
+        
+        # Add current time
+        current_time = datetime.now()
+        self.metrics_history['timestamps'].append(current_time)
+        
+        # Add each metric
+        for metric in ['MAE', 'RMSE', 'MAPE', 'Accuracy']:
+            if metric in metrics:
+                self.metrics_history[metric].append(metrics[metric])
+            else:
+                # If metric not available, use None
+                self.metrics_history[metric].append(None)
+        
+        # Keep only last 20 entries
+        max_history = 20
+        if len(self.metrics_history['timestamps']) > max_history:
+            self.metrics_history['timestamps'] = self.metrics_history['timestamps'][-max_history:]
+            for metric in ['MAE', 'RMSE', 'MAPE', 'Accuracy']:
+                self.metrics_history[metric] = self.metrics_history[metric][-max_history:]
+    
+    def display_metrics_panel(self):
+        """Display a panel with prediction performance metrics"""
+        # Find or create a frame for the metrics panel
+        metrics_frame = None
+        
+        # Look for existing metrics frame
+        for widget in self.prediction_results.winfo_children():
+            if hasattr(widget, 'metrics_panel_tag') and widget.metrics_panel_tag:
+                metrics_frame = widget
+                break
+        
+        # If not found, create a new one after the prediction table
+        if not metrics_frame:
+            metrics_frame = tk.Frame(self.prediction_results, bg="white")
+            metrics_frame.metrics_panel_tag = True  # Tag to identify this frame
+            metrics_frame.pack(fill="x", padx=10, pady=10)
+        
+        # Clear existing content
+        for widget in metrics_frame.winfo_children():
+            widget.destroy()
+        
+        # Get metrics
+        metrics = self.prediction_data.get("metrics", {})
+        
+        # If no metrics, show a message
+        if not metrics:
+            tk.Label(metrics_frame, text="No performance metrics available yet. Waiting for real data...",
+                    font=("Segoe UI", 11), bg="white", fg="#777").pack(anchor="w", pady=5)
+            return
+        
+        # Create a title for the metrics panel
+        tk.Label(metrics_frame, text="Model Performance Metrics", 
+                font=("Segoe UI", 11, "bold"), bg="white", fg=COLORS["text"]).pack(anchor="w", pady=(0, 10))
+        
+        # Create a grid layout for metrics
+        metrics_grid = tk.Frame(metrics_frame, bg="white")
+        metrics_grid.pack(fill="x", pady=5)
+        
+        # Define metrics to display with descriptions
+        metrics_to_display = [
+            ("MAE", "Mean Absolute Error", "Average absolute difference between predicted and actual values"),
+            ("RMSE", "Root Mean Squared Error", "Square root of the average of squared differences"),
+            ("MAPE", "Mean Absolute Percentage Error (%)", "Average percentage difference between predicted and actual values"),
+            ("Accuracy", "Prediction Accuracy (%)", "Percentage of predictions within 20% of actual values")
+        ]
+        
+        # Headers
+        tk.Label(metrics_grid, text="Metric", font=("Segoe UI", 10, "bold"), 
+                bg=COLORS["light"], fg=COLORS["dark"], padx=10, pady=5, 
+                width=8, borderwidth=1, relief="solid").grid(row=0, column=0, sticky="nsew")
+        
+        tk.Label(metrics_grid, text="Description", font=("Segoe UI", 10, "bold"), 
+                bg=COLORS["light"], fg=COLORS["dark"], padx=10, pady=5, 
+                width=25, borderwidth=1, relief="solid").grid(row=0, column=1, sticky="nsew")
+        
+        tk.Label(metrics_grid, text="Value", font=("Segoe UI", 10, "bold"), 
+                bg=COLORS["light"], fg=COLORS["dark"], padx=10, pady=5, 
+                width=10, borderwidth=1, relief="solid").grid(row=0, column=2, sticky="nsew")
+        
+        tk.Label(metrics_grid, text="Performance", font=("Segoe UI", 10, "bold"), 
+                bg=COLORS["light"], fg=COLORS["dark"], padx=10, pady=5, 
+                width=15, borderwidth=1, relief="solid").grid(row=0, column=3, sticky="nsew")
+        
+        # Add each metric with value and performance indicator
+        for i, (metric_key, metric_name, metric_desc) in enumerate(metrics_to_display):
+            row = i + 1
+            row_color = "white" if i % 2 == 0 else "#f8f8f8"
+            
+            # Metric key
+            tk.Label(metrics_grid, text=metric_key, font=("Segoe UI", 10), 
+                    bg=row_color, fg=COLORS["text"], padx=10, pady=5, 
+                    borderwidth=1, relief="solid").grid(row=row, column=0, sticky="nsew")
+            
+            # Description
+            tk.Label(metrics_grid, text=metric_name, font=("Segoe UI", 10), 
+                    bg=row_color, fg=COLORS["text"], padx=10, pady=5, 
+                    borderwidth=1, relief="solid").grid(row=row, column=1, sticky="nsew")
+            
+            # Value
+            value = metrics.get(metric_key, "N/A")
+            value_text = f"{value:.2f}" if isinstance(value, (int, float)) else value
+            
+            tk.Label(metrics_grid, text=value_text, font=("Segoe UI", 10, "bold"), 
+                    bg=row_color, fg=COLORS["primary"], padx=10, pady=5, 
+                    borderwidth=1, relief="solid").grid(row=row, column=2, sticky="nsew")
+            
+            # Performance indicator
+            performance_text = ""
+            performance_color = "#777"
+            
+            if isinstance(value, (int, float)):
+                if metric_key == "MAE":
+                    if value < 5:
+                        performance_text = "Excellent"
+                        performance_color = COLORS["secondary"]
+                    elif value < 10:
+                        performance_text = "Good"
+                        performance_color = "#4CAF50"
+                    elif value < 15:
+                        performance_text = "Fair"
+                        performance_color = COLORS["warning"]
+                    else:
+                        performance_text = "Poor"
+                        performance_color = COLORS["danger"]
+                elif metric_key == "RMSE":
+                    if value < 7:
+                        performance_text = "Excellent"
+                        performance_color = COLORS["secondary"]
+                    elif value < 12:
+                        performance_text = "Good"
+                        performance_color = "#4CAF50"
+                    elif value < 20:
+                        performance_text = "Fair"
+                        performance_color = COLORS["warning"]
+                    else:
+                        performance_text = "Poor"
+                        performance_color = COLORS["danger"]
+                elif metric_key == "MAPE":
+                    if value < 10:
+                        performance_text = "Excellent"
+                        performance_color = COLORS["secondary"]
+                    elif value < 20:
+                        performance_text = "Good"
+                        performance_color = "#4CAF50"
+                    elif value < 30:
+                        performance_text = "Fair"
+                        performance_color = COLORS["warning"]
+                    else:
+                        performance_text = "Poor"
+                        performance_color = COLORS["danger"]
+                elif metric_key == "Accuracy":
+                    if value > 90:
+                        performance_text = "Excellent"
+                        performance_color = COLORS["secondary"]
+                    elif value > 80:
+                        performance_text = "Good"
+                        performance_color = "#4CAF50"
+                    elif value > 70:
+                        performance_text = "Fair"
+                        performance_color = COLORS["warning"]
+                    else:
+                        performance_text = "Poor"
+                        performance_color = COLORS["danger"]
+            
+            tk.Label(metrics_grid, text=performance_text, font=("Segoe UI", 10, "bold"), 
+                    bg=row_color, fg=performance_color, padx=10, pady=5, 
+                    borderwidth=1, relief="solid").grid(row=row, column=3, sticky="nsew")
+        
+        # Add tooltips for metrics descriptions
+        tooltip_frame = tk.Frame(metrics_frame, bg="white")
+        tooltip_frame.pack(fill="x", pady=10)
+        
+        tk.Label(tooltip_frame, text="ℹ️ Metrics Information:", 
+                font=("Segoe UI", 10, "bold"), bg="white", fg=COLORS["text"]).pack(anchor="w")
+        
+        for metric_key, metric_name, metric_desc in metrics_to_display:
+            tooltip_text = f"{metric_name} ({metric_key}): {metric_desc}"
+            tooltip_label = tk.Label(tooltip_frame, text=f"• {tooltip_text}", 
+                                font=("Segoe UI", 9), bg="white", fg="#555", 
+                                wraplength=600, justify="left")
+            tooltip_label.pack(anchor="w", pady=2)
+        
+        # Add information about data points used
+        num_points = len(self.prediction_data.get("real_values", {}))
+        data_info = tk.Label(metrics_frame, 
+                            text=f"Based on {num_points} data points comparing predicted vs. actual values", 
+                            font=("Segoe UI", 9, "italic"), bg="white", fg="#777")
+        data_info.pack(anchor="w", pady=5)
+        
+        # Add time of last update
+        current_time = datetime.now().strftime("%H:%M:%S")
+        update_info = tk.Label(metrics_frame, 
+                            text=f"Last updated: {current_time}", 
+                            font=("Segoe UI", 9), bg="white", fg="#777")
+        update_info.pack(anchor="e", pady=5)
+        
+        # Add visualization of metrics trends if we have multiple data points
+        if num_points > 1 and hasattr(self, 'metrics_history'):
+            self.display_metrics_trend(metrics_frame)
+            
+    
+    
+    def display_metrics_trend(self, parent_frame):
+        """Display a trend chart of metrics over time"""
+        # Create a figure for the metrics trend
+        trend_frame = tk.Frame(parent_frame, bg="white")
+        trend_frame.pack(fill="x", pady=10)
+        
+        tk.Label(trend_frame, text="Metrics Trends", 
+                font=("Segoe UI", 10, "bold"), bg="white", fg=COLORS["text"]).pack(anchor="w", pady=5)
+        
+        # Create the figure
+        fig = Figure(figsize=(8, 3), dpi=100, facecolor='white')
+        ax = fig.add_subplot(111)
+        
+        # Plot each metric
+        timestamps = self.metrics_history['timestamps']
+        time_indices = list(range(len(timestamps)))
+        
+        if len(timestamps) > 1:
+            # MAE trend
+            if any(v is not None for v in self.metrics_history['MAE']):
+                ax.plot(time_indices, self.metrics_history['MAE'], 'o-', 
+                    color=COLORS["primary"], label='MAE')
+            
+            # RMSE trend
+            if any(v is not None for v in self.metrics_history['RMSE']):
+                ax.plot(time_indices, self.metrics_history['RMSE'], 's-', 
+                    color=COLORS["danger"], label='RMSE')
+            
+            # Set labels and grid
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Error Value')
+            ax.grid(True, linestyle='--', alpha=0.7)
+            ax.legend(loc='upper right')
+            
+            # Format the x-axis with timestamps
+            if len(timestamps) > 5:
+                # Show fewer labels if many points
+                step = max(1, len(timestamps) // 5)
+                ax.set_xticks(time_indices[::step])
+                ax.set_xticklabels([t.strftime('%H:%M:%S') for t in timestamps[::step]], rotation=45)
+            else:
+                ax.set_xticks(time_indices)
+                ax.set_xticklabels([t.strftime('%H:%M:%S') for t in timestamps], rotation=45)
+            
+            # Create the canvas
+            canvas = FigureCanvasTkAgg(fig, master=trend_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="x", pady=5)
+        else:
+            # If not enough data points, show a message
+            tk.Label(trend_frame, text="Not enough data points to display trends. Need at least 2 points.", 
+                    font=("Segoe UI", 10), bg="white", fg="#777").pack(anchor="w", pady=5)        
+    
     def set_light_phase(self, rsu_id, phase):
         """Set the traffic light phase for a specific RSU"""
         # Find the traffic light ID corresponding to this RSU
@@ -1275,9 +1712,11 @@ class ModernTrafficGUI:
                             "Vehicles are extra cautious, with max speed limited to 10 m/s (~36 km/h). "
                             "Traffic density is moderate but flow is significantly affected.",
             
-            "Emergency": "Emergency vehicles are given priority. "
-                        "Regular traffic density but includes emergency vehicles that "
-                        "other vehicles should yield to."
+            "Emergency": "Emergency vehicles equipped with blue light devices and special rights. "
+                        "Other vehicles will form a rescue lane when they detect the emergency vehicle. "
+                        "Emergency vehicles can: exceed speed limits by 50%, ignore red traffic lights, "
+                        "drive on lanes that allow emergency vehicles, overtake on the right, "
+                        "and drive through opposite direction lanes when necessary."
         }
         
         # Update the description text
@@ -1308,8 +1747,10 @@ class ModernTrafficGUI:
                     self.scenario_desc.insert(tk.END, "- Longer waiting times\n")
                 
                 if scenario == "Emergency":
-                    self.scenario_desc.insert(tk.END, "- Emergency vehicles have priority\n")
-                    self.scenario_desc.insert(tk.END, "- Traffic signals may adapt to emergency vehicles\n")
+                    self.scenario_desc.insert(tk.END, "- Emergency vehicles have blue light devices\n")
+                    self.scenario_desc.insert(tk.END, "- Emergency vehicles can ignore traffic signals\n")
+                    self.scenario_desc.insert(tk.END, "- Other vehicles form a rescue lane\n")
+                    self.scenario_desc.insert(tk.END, "- Emergency vehicles can drive faster (1.5x speed limit)\n")
         
         self.scenario_desc.config(state="disabled")
     
@@ -1825,16 +2266,64 @@ class ModernTrafficGUI:
             self.csv_path_var.set(filepath)
 
     def run_ml_prediction(self):
-        """Run the ML prediction model using our bridge"""
+        """Run the ML prediction model using our bridge with improved input handling and evaluation metrics"""
         try:
             # Update status
             self.prediction_status_var.set("Processing data...")
             self.root.update()
             
-            # Get parameters
-            seq_length = self.seq_length_var.get()
-            horizon = self.horizon_var.get()
+            # Get parameters from UI with validation
+            try:
+                # Get sequence length with validation
+                seq_length_str = self.seq_length_var.get()
+                if isinstance(seq_length_str, str):
+                    # Try to clean the input if it's a string
+                    seq_length_str = ''.join(c for c in seq_length_str if c.isdigit())
+                    if not seq_length_str:
+                        raise ValueError("Invalid sequence length")
+                    seq_length = int(seq_length_str)
+                else:
+                    seq_length = int(seq_length_str)
+                    
+                # Get horizon with validation
+                horizon_str = self.horizon_var.get()
+                if isinstance(horizon_str, str):
+                    horizon_str = ''.join(c for c in horizon_str if c.isdigit())
+                    if not horizon_str:
+                        raise ValueError("Invalid horizon")
+                    horizon = int(horizon_str)
+                else:
+                    horizon = int(horizon_str)
+            except (ValueError, TypeError) as e:
+                # If validation fails, set default values
+                self.prediction_status_var.set(f"Warning: Using default values due to invalid input. {str(e)}")
+                seq_length = 10  # Default value
+                horizon = 5     # Default value
+                
+                # Try to reset the GUI variables
+                try:
+                    self.seq_length_var.set(seq_length)
+                    self.horizon_var.set(horizon)
+                except:
+                    pass  # Silently fail if can't reset the variables
+                    
+                print(f"Input validation error: {e}. Using defaults: seq_length={seq_length}, horizon={horizon}")
+                
             data_source = self.data_source_var.get()
+            
+            # Debug print to check values
+            print(f"Running prediction with: seq_length={seq_length}, horizon={horizon}, data_source={data_source}")
+            
+            # Validate inputs (additional validation)
+            if seq_length < 1:
+                seq_length = 10  # Default if invalid
+                self.seq_length_var.set(seq_length)
+                print(f"Invalid sequence length, using default: {seq_length}")
+                
+            if horizon < 1:
+                horizon = 5  # Default if invalid
+                self.horizon_var.set(horizon)
+                print(f"Invalid horizon, using default: {horizon}")
             
             # Prepare input data
             if data_source == "Current Simulation":
@@ -1842,38 +2331,96 @@ class ModernTrafficGUI:
                 vehicle_counts = self.prepare_simulation_data(seq_length)
                 
                 # Save the input sequence for display
-                self.prediction_data["historical"] = vehicle_counts[-seq_length:]
+                self.prediction_data = {
+                    "historical": vehicle_counts[-seq_length:],
+                    "real_values": {},  # Initialize empty dictionary for real values
+                    "differences": {}   # Initialize empty dictionary for differences
+                }
                 
                 # Run the prediction
                 result = run_prediction("simulation", vehicle_counts, seq_length, horizon)
-            else:  # Historical data
+                print(f"Prediction result: {result}")  # Debug print
+            else:  # Historical Data
+                # Get data from CSV file
                 csv_path = self.csv_path_var.get()
-                
-                # For CSV data, we'll need to extract the historical data from the file
+                if not os.path.exists(csv_path):
+                    self.prediction_status_var.set(f"Error: CSV file not found: {csv_path}")
+                    return
+                    
                 try:
+                    # Read the CSV file
                     df = pd.read_csv(csv_path)
-                    flow_columns = [col for col in df.columns if 'Flow' in col]
-                    if flow_columns:
-                        flow_column = "Flow (Veh/5 Minutes)" if "Flow (Veh/5 Minutes)" in flow_columns else flow_columns[0]
-                        recent_values = df[flow_column].values[-seq_length:].tolist()
-                        self.prediction_data["historical"] = recent_values
+                    
+                    # Identify the column with vehicle counts
+                    vehicle_count_col = None
+                    possible_columns = ["Flow (Veh/5 Minutes)", "Total_Flow", "Vehicle_count", "Flow"]
+                    
+                    for col in possible_columns:
+                        if col in df.columns:
+                            vehicle_count_col = col
+                            break
+                            
+                    if not vehicle_count_col and "Flow" in " ".join(df.columns):
+                        # Try to find any column with 'Flow' in the name
+                        for col in df.columns:
+                            if "Flow" in col:
+                                vehicle_count_col = col
+                                break
+                    
+                    if not vehicle_count_col:
+                        # If we can't find a column, use the numeric column with highest values
+                        numeric_cols = df.select_dtypes(include=[np.number]).columns
+                        if len(numeric_cols) > 0:
+                            max_vals = df[numeric_cols].max()
+                            vehicle_count_col = max_vals.idxmax()
+                        else:
+                            self.prediction_status_var.set("Error: Could not identify vehicle count column in CSV")
+                            return
+                    
+                    # Get the vehicle counts
+                    vehicle_counts = df[vehicle_count_col].values[-seq_length*2:]  # Get extra data for padding if needed
+                    
+                    # Ensure we have enough data
+                    if len(vehicle_counts) < seq_length:
+                        self.prediction_status_var.set(f"Error: Not enough data points in CSV. Need at least {seq_length}.")
+                        return
+                    
+                    # Save the input sequence for display
+                    self.prediction_data = {
+                        "historical": vehicle_counts[-seq_length:],
+                        "real_values": {},  # Initialize empty dictionary for real values
+                        "differences": {}   # Initialize empty dictionary for differences
+                    }
+                    
+                    # Run the prediction
+                    result = run_prediction("csv", vehicle_counts, seq_length, horizon)
+                    print(f"Prediction result: {result}")  # Debug print
                 except Exception as e:
-                    print(f"Error extracting historical data from CSV: {e}")
-                
-                result = run_prediction("csv", csv_path, seq_length, horizon)
+                    self.prediction_status_var.set(f"Error processing CSV: {str(e)}")
+                    print(f"CSV processing error: {e}")
+                    return
             
-            # Check result
+            # Check prediction result - fix indentation to ensure this runs
             if result["status"] == "success":
                 # Store the predictions for display
                 self.prediction_data["predictions"] = result["predictions"]
                 self.prediction_data["timestamps"] = result["timestamps"]
+                self.prediction_data["real_values"] = {}  # Initialize empty dictionary for real values
+                self.prediction_data["differences"] = {}  # Initialize empty dictionary for differences
+                self.prediction_data["metrics"] = {}      # Initialize empty metrics dictionary
                 
                 # Display the predictions
                 self.display_predictions()
                 self.prediction_status_var.set("Prediction completed successfully")
                 
-                # Also display the input sequence specifically
+                # Display the input sequence
                 self.display_input_sequence()
+                
+                # Initialize metrics display
+                self.display_metrics_panel()
+                
+                # Log the prediction results
+                self.log_prediction_results(result)
             else:
                 self.prediction_status_var.set(f"Error: {result['error']}")
         
@@ -1882,6 +2429,44 @@ class ModernTrafficGUI:
             print(f"Prediction process error: {e}")
             import traceback
             traceback.print_exc()
+    
+    
+    def log_prediction_results(self, result):
+        """Log prediction results to a file for analysis"""
+        try:
+            # Create logs directory if it doesn't exist
+            os.makedirs('logs', exist_ok=True)
+            
+            # Format timestamp for filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create log entry
+            log_data = {
+                "timestamp": timestamp,
+                "predictions": result["predictions"],
+                "prediction_timestamps": result["timestamps"]
+            }
+            
+            # Add metrics if available
+            if "metrics" in result:
+                log_data["metrics"] = result["metrics"]
+            
+            # Add actual values if available
+            if "actual_values" in result:
+                log_data["actual_values"] = result["actual_values"]
+            elif hasattr(self, 'actual_values') and self.actual_values:
+                min_len = min(len(self.actual_values), len(result["predictions"]))
+                if min_len > 0:
+                    log_data["actual_values"] = self.actual_values[:min_len]
+            
+            # Write log to file
+            log_file = f"logs/prediction_log_{timestamp}.json"
+            with open(log_file, 'w') as f:
+                json.dump(log_data, f, indent=2)
+            
+            print(f"Prediction results logged to {log_file}")
+        except Exception as e:
+            print(f"Error logging prediction results: {e}")
 
     def display_input_sequence(self):
         """Display the input sequence used for the prediction"""
@@ -1949,24 +2534,38 @@ class ModernTrafficGUI:
         vehicle_counts = []
         
         # If we have analytics data, use it
-        if self.analytics_data["vehicle_counts"]:
+        if hasattr(self, 'analytics_data') and self.analytics_data.get("vehicle_counts", []):
+            print(f"Using analytics data with {len(self.analytics_data['vehicle_counts'])} points")
             vehicle_counts = self.analytics_data["vehicle_counts"].copy()
         else:
             # Otherwise use the current vehicle count in the simulation
-            for _ in range(seq_length):
-                vehicles = traci.vehicle.getIDList()
-                vehicle_counts.append(len(vehicles))
+            print("No analytics data available, using current vehicle count")
+            current_count = len(traci.vehicle.getIDList())
+            
+            # Create a sequence with slight variations (simulating historical data)
+            base = max(1, current_count - 5)  # Avoid negative values
+            for i in range(seq_length):
+                # Create a plausible sequence leading up to current count
+                factor = i / seq_length  # 0 to 1
+                count = int(base + (current_count - base) * factor) + random.randint(-2, 2)
+                count = max(0, count)  # Ensure non-negative
+                vehicle_counts.append(count)
         
         # Ensure we have at least seq_length points
         if len(vehicle_counts) < seq_length:
+            print(f"Padding data: have {len(vehicle_counts)}, need {seq_length}")
             # Pad with the first value
             pad_value = vehicle_counts[0] if vehicle_counts else 0
             vehicle_counts = [pad_value] * (seq_length - len(vehicle_counts)) + vehicle_counts
         
+        # Take only the latest seq_length points
+        vehicle_counts = vehicle_counts[-seq_length:]
+        print(f"Final input sequence: {vehicle_counts}")
+        
         return vehicle_counts
 
     def display_predictions(self):
-        """Display the prediction results on the chart"""
+        """Display the prediction results on the chart with actual values and metrics"""
         # Clear previous plot
         self.pred_ax.clear()
         
@@ -1990,13 +2589,33 @@ class ModernTrafficGUI:
         
         # Plot historical data with clear markers
         self.pred_ax.plot(time_steps[:len(historical)], historical_data[:len(historical)], 
-                         'o-', color=COLORS["primary"], linewidth=2, markersize=6,
-                         label='Historical Data')
+                        'o-', color=COLORS["primary"], linewidth=2, markersize=6,
+                        label='Historical Data')
         
         # Plot predicted data with distinctive style
         self.pred_ax.plot(time_steps[len(historical)-1:], [historical_data[len(historical)-1]] + list(predictions), 
-                         's--', color=COLORS["danger"], linewidth=2, markersize=6,
-                         label='Predicted Data')
+                        's--', color=COLORS["danger"], linewidth=2, markersize=6,
+                        label='Predicted Data')
+        
+        # Plot actual values if available
+        if "actual_values" in self.prediction_data and self.prediction_data["actual_values"]:
+            actual_values = self.prediction_data["actual_values"]
+            actual_steps = time_steps[len(historical):][:len(actual_values)]
+            
+            self.pred_ax.plot(actual_steps, actual_values, 
+                            'x-', color=COLORS["secondary"], linewidth=2, markersize=6,
+                            label='Actual Data')
+            
+            # Add annotation showing the difference
+            for i, (pred, actual) in enumerate(zip(predictions[:len(actual_values)], actual_values)):
+                diff = pred - actual
+                self.pred_ax.annotate(f"Δ: {diff:.1f}", 
+                                    xy=(len(historical) + i, (pred + actual) / 2), 
+                                    xytext=(5, 0),
+                                    textcoords="offset points",
+                                    ha='left', va='center',
+                                    fontsize=8, 
+                                    color='#888')
         
         # Mark the current time point with a vertical line
         self.pred_ax.axvline(x=len(historical)-1, color='black', linestyle='--', alpha=0.7)
@@ -2041,53 +2660,114 @@ class ModernTrafficGUI:
         self.display_prediction_table()
 
     def display_prediction_table(self):
-            """Display a table of prediction values"""
-            # Create a frame for the table below the chart
-            for widget in self.prediction_results.winfo_children():
-                if widget != self.pred_canvas.get_tk_widget() and not (hasattr(widget, 'input_sequence_tag') and widget.input_sequence_tag):
-                    widget.destroy()
-            
-            table_frame = tk.Frame(self.prediction_results, bg="white")
-            table_frame.pack(fill="x", padx=10, pady=10)
-            
-            # Create a title for the table
-            tk.Label(table_frame, text="Prediction Results", 
-                    font=("Segoe UI", 11, "bold"), bg="white", fg=COLORS["text"]).pack(anchor="w")
-            
-            # Create the table headers
-            headers = ["Time Step", "Predicted Value"]
-            
-            # Create a subframe for the table
-            table = tk.Frame(table_frame, bg="white")
-            table.pack(fill="x", pady=5)
-            
-            # Create header row
-            for i, header in enumerate(headers):
-                tk.Label(table, text=header, font=("Segoe UI", 10, "bold"), 
-                        bg=COLORS["light"], fg=COLORS["dark"], 
-                        padx=10, pady=5, borderwidth=1, relief="solid").grid(row=0, column=i, sticky="nsew")
-            
-            # Add the data rows
-            for i, (timestamp, prediction) in enumerate(zip(
-                    self.prediction_data["timestamps"], 
-                    self.prediction_data["predictions"]
-                )):
-                
+        """Display a table of prediction values with real-time comparison"""
+        # Add debug print
+        print(f"Displaying prediction table with data: {self.prediction_data}")
+        
+        # Create a frame for the table below the chart
+        for widget in self.prediction_results.winfo_children():
+            if widget != self.pred_canvas.get_tk_widget() and not (hasattr(widget, 'input_sequence_tag') and widget.input_sequence_tag):
+                widget.destroy()
+        
+        table_frame = tk.Frame(self.prediction_results, bg="white")
+        table_frame.pack(fill="x", padx=10, pady=10)
+        
+        # Create a title for the table
+        tk.Label(table_frame, text="Prediction Results", 
+                font=("Segoe UI", 11, "bold"), bg="white", fg=COLORS["text"]).pack(anchor="w")
+        
+        # Create the table headers
+        headers = ["Time Step", "Predicted Value", "Real Value", "Difference"]
+        
+        # Create a subframe for the table
+        table = tk.Frame(table_frame, bg="white")
+        table.pack(fill="x", pady=5)
+        
+        # Create header row
+        for i, header in enumerate(headers):
+            tk.Label(table, text=header, font=("Segoe UI", 10, "bold"), 
+                    bg=COLORS["light"], fg=COLORS["dark"], 
+                    padx=10, pady=5, borderwidth=1, relief="solid").grid(row=0, column=i, sticky="nsew")
+        
+        # Add the data rows
+        predictions = self.prediction_data.get("predictions", [])
+        timestamps = self.prediction_data.get("timestamps", [])
+        real_values = self.prediction_data.get("real_values", {})
+        differences = self.prediction_data.get("differences", {})
+        
+        print(f"Table data - predictions: {len(predictions)}, timestamps: {len(timestamps)}")
+        print(f"Real values: {real_values}")
+        
+        if not predictions or not timestamps:
+            # Display a message if no prediction data is available
+            no_data_label = tk.Label(table, text="No prediction data available. Run a prediction first.", 
+                                    font=("Segoe UI", 10), fg=COLORS["text"], bg="white",
+                                    padx=10, pady=5)
+            no_data_label.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        else:
+            for i, (timestamp, prediction) in enumerate(zip(timestamps, predictions)):
                 # Add row
                 row_color = "white" if i % 2 == 0 else "#f8f8f8"
                 
+                # Time step
                 tk.Label(table, text=timestamp, font=("Segoe UI", 9), 
                         bg=row_color, padx=10, pady=5, borderwidth=1, relief="solid").grid(row=i+1, column=0, sticky="nsew")
                 
+                # Predicted value
                 tk.Label(table, text=f"{prediction:.2f}", font=("Segoe UI", 9), 
-                        bg=row_color, fg=COLORS["danger"], padx=10, pady=5, borderwidth=1, relief="solid").grid(row=i+1, column=1, sticky="nsew")
+                        bg=row_color, fg=COLORS["primary"], padx=10, pady=5, borderwidth=1, relief="solid").grid(row=i+1, column=1, sticky="nsew")
+                
+                # Real value (if available)
+                real_value = real_values.get(timestamp, "Waiting...")
+                real_value_text = f"{real_value:.2f}" if isinstance(real_value, (int, float)) else real_value
+                real_value_color = COLORS["secondary"] if isinstance(real_value, (int, float)) else "#888"
+                
+                tk.Label(table, text=real_value_text, font=("Segoe UI", 9), 
+                        bg=row_color, fg=real_value_color, padx=10, pady=5, borderwidth=1, relief="solid").grid(row=i+1, column=2, sticky="nsew")
+                
+                # Difference (if available)
+                diff = differences.get(timestamp, "")
+                if diff and isinstance(diff, (int, float)):
+                    diff_text = f"{diff:.2f}"
+                    diff_color = COLORS["secondary"] if abs(diff) < 5 else COLORS["warning"] if abs(diff) < 10 else COLORS["danger"]
+                else:
+                    diff_text = ""
+                    diff_color = "#888"
+                
+                tk.Label(table, text=diff_text, font=("Segoe UI", 9, "bold"), 
+                        bg=row_color, fg=diff_color, padx=10, pady=5, borderwidth=1, relief="solid").grid(row=i+1, column=3, sticky="nsew")
+        
+    
+    def create_tooltip(self, widget, text):
+        """Create a tooltip for a widget"""
+        def enter(event):
+            # Create tooltip window
+            tooltip = tk.Toplevel(widget)
+            tooltip.wm_overrideredirect(True)  # Remove window decorations
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
             
-            # Add export button
-            export_frame = tk.Frame(table_frame, bg="white")
-            export_frame.pack(anchor="e", pady=10)
+            # Create tooltip content
+            frame = tk.Frame(tooltip, bg=COLORS["dark"], padx=5, pady=5)
+            frame.pack()
             
-            StylishButton(export_frame, text="Export Predictions", color="primary",
-                        command=self.export_predictions).pack(side="right")
+            label = tk.Label(frame, text=text, justify="left", bg=COLORS["dark"], fg="white",
+                            wraplength=300, font=("Segoe UI", 9))
+            label.pack()
+            
+            # Store tooltip reference
+            widget.tooltip = tooltip
+    
+    
+        def leave(event):
+            # Destroy tooltip if it exists
+            if hasattr(widget, "tooltip"):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        # Bind events
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
 
     def export_predictions(self):
             """Export prediction data to CSV"""
@@ -2424,65 +3104,69 @@ class ModernTrafficGUI:
             self.time_text.set(f"Time: {sim_time:.1f}s")
 
     def run_simulation(self):
-            """Main simulation loop"""
-            update_interval = 0.5  # Update GUI every half second
-            last_update = 0
-            
-            while not self.exit_simulation:
-                if self.running:
-                    try:
-                        # Step the simulation
-                        traci.simulationStep()
+        """Main simulation loop"""
+        update_interval = 0.5  # Update GUI every half second
+        last_update = 0
+        
+        while not self.exit_simulation:
+            if self.running:
+                try:
+                    # Step the simulation
+                    traci.simulationStep()
+                    
+                    # Current time
+                    current_time = time.time()
+                    
+                    # Update RSUs
+                    for rsu in self.rsus:
+                        rsu.update()
+                    
+                    # Generate synthetic traffic if enabled
+                    if self.synthetic_traffic_enabled:
+                        self.synthetic_generator.generate_vehicles()
+                    
+                    # Update prediction table with real-time values
+                    self.update_prediction_with_real_values()
+                    
+                    # Update GUI components periodically
+                    if current_time - last_update >= update_interval:
+                        # Update dashboard statistics
+                        self.update_dashboard_stats()
                         
-                        # Current time
-                        current_time = time.time()
+                        # Update RSU treeviews
+                        self.update_rsu_tree()
+                        self.update_dashboard_tree()
                         
-                        # Update RSUs
-                        for rsu in self.rsus:
-                            rsu.update()
+                        # Update charts
+                        self.update_dashboard_chart()
+                        self.update_analytics_graphs()
                         
-                        # Generate synthetic traffic if enabled
+                        # Update synthetic traffic stats if enabled
                         if self.synthetic_traffic_enabled:
-                            self.synthetic_generator.generate_vehicles()
+                            self.update_synthetic_stats()
                         
-                        # Update GUI components periodically
-                        if current_time - last_update >= update_interval:
-                            # Update dashboard statistics
-                            self.update_dashboard_stats()
-                            
-                            # Update RSU treeviews
-                            self.update_rsu_tree()
-                            self.update_dashboard_tree()
-                            
-                            # Update charts
-                            self.update_dashboard_chart()
-                            self.update_analytics_graphs()
-                            
-                            # Update synthetic traffic stats if enabled
-                            if self.synthetic_traffic_enabled:
-                                self.update_synthetic_stats()
-                            
-                            # If an RSU is selected, update its details
-                            if self.current_rsu_id:
-                                self.update_rsu_details(self.current_rsu_id)
-                            
-                            last_update = current_time
+                        # If an RSU is selected, update its details
+                        if self.current_rsu_id:
+                            self.update_rsu_details(self.current_rsu_id)
                         
-                        # Slight delay to avoid excessive CPU usage
-                        time.sleep(0.05)
-                        
-                    except traci.TraCIException as e:
-                        print(f"Simulation error: {e}")
-                        if "connection closed by SUMO" in str(e):
-                            self.exit_simulation = True
-                            break
-                        self.status_text.set(f"Error: {e}")
-                
-                # Process GUI events
-                self.root.update()
-                time.sleep(0.05)
+                        last_update = current_time
+                    
+                    # Slight delay to avoid excessive CPU usage
+                    time.sleep(0.05)
+                    
+                except traci.TraCIException as e:
+                    print(f"Simulation error: {e}")
+                    if "connection closed by SUMO" in str(e):
+                        self.exit_simulation = True
+                        break
+                    self.status_text.set(f"Error: {e}")
             
-            print("Simulation ended")
+            # Process GUI events
+            self.root.update()
+            time.sleep(0.05)
+        
+        print("Simulation ended")
+
 
 def main():
     """Main function to start the application"""

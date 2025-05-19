@@ -1,6 +1,6 @@
 """
 Traffic Prediction Bridge - Integrates ML model predictions with the SUMO GUI system
-Improved version with fixed import paths
+Improved version with optimized input pipeline and evaluation metrics
 """
 
 import os
@@ -19,6 +19,8 @@ latest_predictions = None
 prediction_timestamp = None
 prediction_status = "idle"  # Can be "idle", "running", "success", "error"
 prediction_error = None
+latest_actual_values = None  # For storing actual values for evaluation
+latest_metrics = None  # For storing evaluation metrics
 
 # Debug mode
 DEBUG = True
@@ -203,6 +205,43 @@ def safe_read_csv(file_path):
         print(f"Warning: The file {file_path} is empty. Using default model settings.")
         return pd.DataFrame(data=[["lstm"]])
 
+def prepare_model_input(data, seq_length, scaler=None):
+    """
+    Properly format input data for the LSTM model
+    
+    Args:
+        data: List or array of vehicle counts/flow values
+        seq_length: Input sequence length (window size)
+        scaler: Optional scaler for normalization
+        
+    Returns:
+        Properly formatted input tensor
+    """
+    # Convert to numpy array if it's a list
+    if isinstance(data, list):
+        data = np.array(data).astype(float)
+    
+    # Ensure we have the right length
+    if len(data) < seq_length:
+        raise ValueError(f"Not enough data points: {len(data)} < {seq_length}")
+    
+    # Use the most recent data points if we have more than needed
+    if len(data) > seq_length:
+        data = data[-seq_length:]
+    
+    # Reshape for normalization: (samples, features)
+    data = data.reshape(-1, 1)
+    
+    # Apply scaling if provided
+    if scaler:
+        data = scaler.transform(data)
+    
+    # Reshape for LSTM: (batch_size, time_steps, features)
+    # LSTM models expect 3D input: [batch, sequence_length, features]
+    input_tensor = data.reshape(1, seq_length, 1)
+    
+    return input_tensor
+
 # Function to prepare data from a CSV file
 def prepare_csv_data(csv_path, seq_length, scaler=None):
     """
@@ -243,17 +282,23 @@ def prepare_csv_data(csv_path, seq_length, scaler=None):
         last_values = df[flow_column].values[-seq_length:].astype(float)
         debug_print(f"Extracted {len(last_values)} values: {last_values}")
         
-        # Normalize data if scaler is provided
-        if scaler:
-            debug_print("Applying scaler to the data")
-            last_values = scaler.transform(last_values.reshape(-1, 1))
-            debug_print(f"Normalized values: {last_values.flatten()}")
+        # Also extract future values for evaluation
+        future_values = None
+        if len(df) > seq_length:
+            future_start_idx = len(df) - seq_length
+            # Get up to 5 future values if available
+            future_end_idx = min(len(df), future_start_idx + 5)
+            future_values = df[flow_column].values[future_start_idx:future_end_idx].astype(float)
+            debug_print(f"Extracted {len(future_values)} future values for evaluation")
         
-        # Format for LSTM: (1, sequence_length, 1)
-        input_sequence = last_values.reshape(1, seq_length, 1)
-        debug_print(f"Input sequence shape: {input_sequence.shape}")
+        # Format the input sequence using our helper function
+        input_sequence = prepare_model_input(last_values, seq_length, scaler)
         
-        return {"status": "success", "data": input_sequence}
+        return {
+            "status": "success", 
+            "data": input_sequence,
+            "future_values": future_values
+        }
     
     except Exception as e:
         print(f"Error preparing CSV data: {e}")
@@ -276,37 +321,50 @@ def prepare_simulation_data(vehicle_counts, seq_length, scaler=None):
     try:
         debug_print(f"Preparing simulation data, {len(vehicle_counts)} vehicle counts")
         
-        # Ensure we have exactly seq_length values
-        if len(vehicle_counts) < seq_length:
-            return {"status": "error", "error": f"Not enough data points: {len(vehicle_counts)} < {seq_length}"}
-        elif len(vehicle_counts) > seq_length:
-            vehicle_counts = vehicle_counts[-seq_length:]  # Take last seq_length values
-        
-        # Convert to numpy array
-        values = np.array(vehicle_counts).astype(float)
-        debug_print(f"Values after conversion: {values}")
-        
-        # Normalize data if scaler is provided
-        if scaler:
-            debug_print("Applying scaler to the data")
-            values = scaler.transform(values.reshape(-1, 1))
-            debug_print(f"Normalized values: {values.flatten()}")
-        
-        # Format for LSTM: (1, sequence_length, 1)
-        input_sequence = values.reshape(1, seq_length, 1)
-        debug_print(f"Input sequence shape: {input_sequence.shape}")
-        
-        return {"status": "success", "data": input_sequence}
+        # Format the input sequence using our helper function
+        try:
+            input_sequence = prepare_model_input(vehicle_counts, seq_length, scaler)
+            return {"status": "success", "data": input_sequence}
+        except ValueError as e:
+            return {"status": "error", "error": str(e)}
     
     except Exception as e:
         print(f"Error preparing simulation data: {e}")
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
 
+# Evaluation metrics functions
+def mean_absolute_error(y_true, y_pred):
+    """Calculate Mean Absolute Error (MAE)"""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    return np.mean(np.abs(y_true - y_pred))
+
+def root_mean_squared_error(y_true, y_pred):
+    """Calculate Root Mean Squared Error (RMSE)"""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+def mean_absolute_percentage_error(y_true, y_pred):
+    """Calculate Mean Absolute Percentage Error (MAPE)"""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    # Avoid division by zero
+    mask = y_true != 0
+    if not any(mask):
+        return float('inf')  # Return infinity if all y_true values are zero
+    return 100 * np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]))
+
+def calculate_metrics(y_true, y_pred):
+    """Calculate all evaluation metrics"""
+    return {
+        "MAE": mean_absolute_error(y_true, y_pred),
+        "RMSE": root_mean_squared_error(y_true, y_pred),
+        "MAPE": mean_absolute_percentage_error(y_true, y_pred)
+    }
+
 # Main prediction function that will be called from the GUI
 def run_prediction(data_source, data, seq_length=10, horizon=5):
     """
-    Run traffic prediction
+    Run traffic prediction with improved input handling and evaluation metrics
     
     Args:
         data_source: 'simulation' or 'csv'
@@ -317,7 +375,7 @@ def run_prediction(data_source, data, seq_length=10, horizon=5):
     Returns:
         Dictionary with prediction results or error
     """
-    global latest_predictions, prediction_timestamp, prediction_status, prediction_error
+    global latest_predictions, prediction_timestamp, prediction_status, prediction_error, latest_actual_values, latest_metrics
     
     try:
         debug_print(f"Starting prediction with {data_source} data, seq_length={seq_length}, horizon={horizon}")
@@ -340,10 +398,15 @@ def run_prediction(data_source, data, seq_length=10, horizon=5):
         
         # Prepare input data
         debug_print(f"Preparing input data from {data_source}")
+        future_values = None
+        
         if data_source == "simulation":
             input_result = prepare_simulation_data(data, seq_length, scaler)
         else:  # csv
             input_result = prepare_csv_data(data, seq_length, scaler)
+            # Extract future values for evaluation if available
+            if input_result["status"] == "success" and "future_values" in input_result:
+                future_values = input_result["future_values"]
         
         if input_result["status"] != "success":
             prediction_status = "error"
@@ -381,6 +444,22 @@ def run_prediction(data_source, data, seq_length=10, horizon=5):
             prediction_timestamp = datetime.now()
             prediction_status = "success"
             
+            # Store actual values for evaluation if available
+            latest_actual_values = future_values
+            
+            # Calculate evaluation metrics if actual values are available
+            if future_values is not None and len(future_values) > 0:
+                # Limit to the shorter length
+                min_length = min(len(latest_predictions), len(future_values))
+                metrics = calculate_metrics(
+                    future_values[:min_length],
+                    latest_predictions[:min_length]
+                )
+                latest_metrics = metrics
+                debug_print(f"Evaluation metrics: {metrics}")
+            else:
+                latest_metrics = None
+            
             # Generate timestamps for predictions (5-minute intervals)
             current_time = datetime.now()
             timestamps = []
@@ -390,11 +469,18 @@ def run_prediction(data_source, data, seq_length=10, horizon=5):
             
             # Return success with results
             debug_print("Prediction completed successfully")
-            return {
+            result = {
                 "status": "success",
                 "predictions": latest_predictions,
-                "timestamps": timestamps
+                "timestamps": timestamps,
             }
+            
+            # Add metrics if available
+            if latest_metrics:
+                result["metrics"] = latest_metrics
+                result["actual_values"] = future_values[:min_length].tolist()
+            
+            return result
         
         except Exception as e:
             print(f"Error in prediction: {e}")
@@ -414,13 +500,51 @@ def run_prediction(data_source, data, seq_length=10, horizon=5):
 
 # Function to get the latest prediction results
 def get_latest_predictions():
-    """Get the latest prediction results"""
-    return {
+    """Get the latest prediction results with evaluation metrics"""
+    result = {
         "predictions": latest_predictions,
         "timestamp": prediction_timestamp.isoformat() if prediction_timestamp else None,
         "status": prediction_status,
         "error": prediction_error
     }
+    
+    # Add evaluation data if available
+    if latest_actual_values is not None:
+        result["actual_values"] = latest_actual_values.tolist() if isinstance(latest_actual_values, np.ndarray) else latest_actual_values
+    
+    if latest_metrics is not None:
+        result["metrics"] = latest_metrics
+    
+    return result
+
+# Test the prediction pipeline
+def test_prediction(csv_path=None, use_simulation=False):
+    """Test the prediction pipeline with sample data"""
+    print("Testing prediction pipeline...")
+    
+    if csv_path and os.path.exists(csv_path):
+        print(f"Using CSV file: {csv_path}")
+        result = run_prediction("csv", csv_path)
+    elif use_simulation:
+        # Generate sample simulation data
+        print("Using simulated data")
+        sample_data = [random.randint(10, 100) for _ in range(20)]
+        result = run_prediction("simulation", sample_data)
+    else:
+        print("No valid data source provided")
+        return
+    
+    if result["status"] == "success":
+        print("Prediction successful!")
+        print("Predictions:", result["predictions"])
+        print("Timestamps:", result["timestamps"])
+        
+        if "metrics" in result:
+            print("Evaluation metrics:")
+            for metric, value in result["metrics"].items():
+                print(f"  {metric}: {value:.4f}")
+    else:
+        print("Prediction failed:", result["error"])
 
 # Example usage
 if __name__ == "__main__":
@@ -433,12 +557,8 @@ if __name__ == "__main__":
     # Initialize the environment
     setup_environment()
     
-    # Run a test prediction
-    result = run_prediction("csv", csv_path)
+    # Import for test mode
+    import random
     
-    if result["status"] == "success":
-        print("Prediction successful!")
-        print("Predictions:", result["predictions"])
-        print("Timestamps:", result["timestamps"])
-    else:
-        print("Prediction failed:", result["error"])
+    # Run a test prediction
+    test_prediction(csv_path)
