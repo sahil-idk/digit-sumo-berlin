@@ -267,57 +267,77 @@ class ScenarioManager:
     """Manages different traffic scenarios for what-if analysis"""
     # Modified ScenarioManager.__init__ method
     def __init__(self):
-        # Define scenarios with unique vehicle types and colors
+    # Define scenarios with unique vehicle types and colors
         self.scenarios = {
             "Normal Traffic": {"density": 1, "vehicle_type": "normal_vehicle", "color": (0, 200, 0, 255)},  # Green
             "Rush Hour": {"density": 10, "vehicle_type": "rush_vehicle", "color": (255, 0, 0, 255)},  # Red
             "Rainy Day": {"density": 3, "vehicle_type": "rain_vehicle", "color": (0, 0, 255, 255), "max_speed": 15.0},  # Blue
             "Foggy Morning": {"density": 5, "vehicle_type": "fog_vehicle", "color": (128, 128, 128, 255), "max_speed": 10.0},  # Gray
-            "Emergency": {"density": 2, "vehicle_type": "emergency_vehicle", "color": (255, 165, 0, 255), "is_emergency": True}  # Orange
+            "Emergency": {"density": 2, "vehicle_type": "emergency_vehicle", "color": (255, 255, 255, 255), "is_emergency": True}  # White (standard emergency color)
         }
         
         # Initialize vehicle types for scenarios
         for scenario, config in self.scenarios.items():
             try:
-                # For emergency vehicles, create it with the emergency class directly
+                # Create base vehicle type
+                traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
+                traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                
+                # Configure scenario-specific settings
                 if scenario == "Emergency":
-                    # Use the correct parameters for emergency vehicles
-                    try:
-                        # First check if the type already exists
-                        if config["vehicle_type"] in traci.vehicletype.getIDList():
-                            traci.vehicletype.setColor(config["vehicle_type"], config["color"])
-                        else:
-                            # Create a new vehicle type with the emergency class
-                            traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
-                            traci.vehicletype.setColor(config["vehicle_type"], config["color"])
-                            
-                            # Set emergency vehicle properties
-                            traci.vehicletype.setEmergency(config["vehicle_type"], True)
-                            
-                            # Set GUI shape to emergency vehicle
-                            traci.vehicletype.setGuiShape(config["vehicle_type"], "emergency")
-                            
-                            # Set speed factor to 1.5 (allowing 50% faster than speed limit)
-                            traci.vehicletype.setSpeedFactor(config["vehicle_type"], 1.5)
-                            
-                            # Add blue light parameter (if supported in this SUMO version)
-                            try:
-                                traci.vehicletype.setParameter(config["vehicle_type"], "has.bluelight.device", "true")
-                            except:
-                                print("Blue light device parameter not supported, using default emergency vehicle")
-                    except Exception as e:
-                        print(f"Error setting up emergency vehicle: {e}, falling back to standard method")
-                        traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
-                        traci.vehicletype.setColor(config["vehicle_type"], config["color"])
-                else:
-                    # Standard vehicle setup for non-emergency
-                    traci.vehicletype.copy("veh_passenger", config["vehicle_type"])
-                    traci.vehicletype.setColor(config["vehicle_type"], config["color"])
+                    # Get all available methods for reference/debugging
+                    available_methods = [method for method in dir(traci.vehicletype) 
+                                        if not method.startswith('_')]
+                    print(f"Available vehicletype methods: {available_methods}")
                     
-                    # Set max speed for weather scenarios
-                    if "max_speed" in config:
-                        traci.vehicletype.setMaxSpeed(config["vehicle_type"], config["max_speed"])
+                    # Try to set emergency type properties
+                    try:
+                        # Try different approaches to set vehicle class
+                        try:
+                            traci.vehicletype.setVClass(config["vehicle_type"], "emergency")
+                            print("Set vClass to emergency")
+                        except AttributeError:
+                            try:
+                                # Alternative method if available
+                                traci.vehicletype.setEmergency(config["vehicle_type"], True)
+                                print("Set emergency flag to True")
+                            except:
+                                print("Could not set vehicle class to emergency")
                         
+                        # Try to set shape
+                        try:
+                            traci.vehicletype.setShapeClass(config["vehicle_type"], "emergency")
+                            print("Set shape class to emergency")
+                        except AttributeError:
+                            try:
+                                traci.vehicletype.setGuiShape(config["vehicle_type"], "emergency")
+                                print("Set GUI shape to emergency")
+                            except:
+                                print("Could not set shape to emergency")
+                        
+                        # Set speed factor (should be supported in all versions)
+                        traci.vehicletype.setSpeedFactor(config["vehicle_type"], 1.5)
+                        print("Set speed factor to 1.5")
+                        
+                        # Try to set bluelight parameter
+                        try:
+                            traci.vehicletype.setParameter(config["vehicle_type"], "has.bluelight.device", "true")
+                            print("Set bluelight parameter to true")
+                        except:
+                            print("Could not set bluelight parameter")
+                        
+                        # Set high acceleration and deceleration
+                        traci.vehicletype.setAccel(config["vehicle_type"], 5.0)
+                        traci.vehicletype.setDecel(config["vehicle_type"], 9.0)
+                        print("Set high acceleration/deceleration values")
+                        
+                    except Exception as e:
+                        print(f"Error configuring emergency vehicle type: {e}")
+                
+                # Set max speed for weather scenarios
+                elif "max_speed" in config:
+                    traci.vehicletype.setMaxSpeed(config["vehicle_type"], config["max_speed"])
+                    
             except traci.TraCIException as e:
                 print(f"Error setting up vehicle type for {scenario}: {e}")
     
@@ -442,20 +462,43 @@ class ScenarioManager:
                 # For emergency vehicles, set additional parameters
                 if scenario_name == "Emergency":
                     try:
-                        # Enable blue light device directly on vehicle if supported
-                        traci.vehicle.setParameter(vehicle_id, "has.bluelight.device", "true")
+                        # Print all available vehicle methods for debugging
+                        print(f"Vehicle methods: {[m for m in dir(traci.vehicle) if not m.startswith('_')]}")
                         
-                        # Configure speed mode (binary parameter controlling driving rules adherence)
-                        # This value allows ignoring traffic lights while still avoiding collisions
-                        # The exact value depends on the SUMO version, this is a common setting
-                        traci.vehicle.setSpeedMode(vehicle_id, 31)  # Binary: 11111
+                        # Set speed mode to ignore rules (0 = ignore all)
+                        traci.vehicle.setSpeedMode(vehicle_id, 0)
+                        print(f"Set speed mode to 0 for {vehicle_id}")
                         
-                        # Set more aggressive lane changing behavior
-                        traci.vehicle.setLaneChangeMode(vehicle_id, 256)  # Strategic changes only
+                        # Set lane change mode to aggressive (0 = disable all restrictions)
+                        traci.vehicle.setLaneChangeMode(vehicle_id, 0)
+                        print(f"Set lane change mode to 0 for {vehicle_id}")
                         
-                        print(f"Added {scenario_name} emergency vehicle {vehicle_id} with special rights")
+                        # Try to set bluelight parameter on vehicle itself
+                        try:
+                            traci.vehicle.setParameter(vehicle_id, "has.bluelight.device", "true")
+                            print(f"Set bluelight parameter for {vehicle_id}")
+                        except:
+                            print(f"Could not set bluelight parameter for {vehicle_id}")
+                        
+                        # Increase speed factor for this vehicle
+                        traci.vehicle.setSpeedFactor(vehicle_id, 2.0)
+                        print(f"Set speed factor to 2.0 for {vehicle_id}")
+                        
+                        # Try to set vehicle class directly
+                        try:
+                            traci.vehicle.setVehicleClass(vehicle_id, "emergency")
+                            print(f"Set vehicle class to emergency for {vehicle_id}")
+                        except:
+                            print(f"Could not set vehicle class for {vehicle_id}")
+                            
+                        # Set high accel/decel
+                        traci.vehicle.setAccel(vehicle_id, 5.0)
+                        traci.vehicle.setDecel(vehicle_id, 9.0)
+                        print(f"Set high accel/decel for {vehicle_id}")
+                        
+                        print(f"Added emergency vehicle {vehicle_id}")
                     except Exception as e:
-                        print(f"Warning: Could not set some emergency parameters: {e}")
+                        print(f"Error configuring emergency vehicle {vehicle_id}: {e}")
                 else:
                     print(f"Added {scenario_name} vehicle {vehicle_id}")
                     
@@ -467,14 +510,53 @@ class ScenarioManager:
         
         print(f"Added {added}/{adjusted_density} vehicles for {scenario_name} scenario")
         
-        
+    def debug_emergency_vehicle(self, vehicle_id):
+        """Print detailed information about an emergency vehicle"""
+        try:
+            print(f"Emergency vehicle {vehicle_id} debug info:")
+            try:
+                print(f"  Vehicle class: {traci.vehicle.getVehicleClass(vehicle_id)}")
+            except:
+                print("  Could not get vehicle class")
+                
+            print(f"  Speed factor: {traci.vehicle.getSpeedFactor(vehicle_id)}")
+            print(f"  Speed mode: {traci.vehicle.getSpeedMode(vehicle_id)}")
+            print(f"  Lane change mode: {traci.vehicle.getLaneChangeMode(vehicle_id)}")
+            
+            # Check if the vehicle has the bluelight device parameter
+            try:
+                has_bluelight = traci.vehicle.getParameter(vehicle_id, "has.bluelight.device")
+                print(f"  Has bluelight device: {has_bluelight}")
+            except:
+                print("  Could not retrieve bluelight device parameter")
+                
+            # Check if stopped at traffic light
+            try:
+                stopped = traci.vehicle.isStoppedAtTrafficLight(vehicle_id)
+                print(f"  Stopped at traffic light: {stopped}")
+            except:
+                print("  Could not determine if stopped at traffic light")
+                
+            # Check current status
+            print(f"  Current speed: {traci.vehicle.getSpeed(vehicle_id)}")
+            print(f"  Current acceleration: {traci.vehicle.getAcceleration(vehicle_id)}")
+            print(f"  Waiting time: {traci.vehicle.getWaitingTime(vehicle_id)}")
+        except traci.TraCIException as e:
+            print(f"Error getting debug info for {vehicle_id}: {e}")    
     
 class ModernTrafficGUI:
     """Modern GUI for the traffic simulation application"""
     def __init__(self):
         # Initialize SUMO
+        # Initialize SUMO
         self.sumoBinary = "sumo-gui"
-        self.sumoCmd = [self.sumoBinary, "-c", "osm.sumocfg"]
+        self.sumoCmd = [
+            self.sumoBinary, 
+            "-c", "osm.sumocfg",
+            "--lateral-resolution", "0.5",  # Enable sublane model for rescue lane formation
+            "--device.bluelight.explicit", "true",  # Explicitly enable bluelight devices
+            "--time-to-teleport", "-1"  # Prevent vehicles from being teleported when stuck
+        ]
         try:
             traci.start(self.sumoCmd)
             print("SUMO started successfully")
@@ -3107,15 +3189,33 @@ class ModernTrafficGUI:
         """Main simulation loop"""
         update_interval = 0.5  # Update GUI every half second
         last_update = 0
-        
+        debug_counter = 0  # Use a counter instead of time-based debugging
         while not self.exit_simulation:
             if self.running:
                 try:
-                    # Step the simulation
+                        # Step the simulation
                     traci.simulationStep()
                     
                     # Current time
                     current_time = time.time()
+                    
+                    # Debug emergency vehicles using a counter
+                    debug_counter += 1
+                    if debug_counter >= 100:  # Debug approximately every 5 seconds (at 20fps)
+                        debug_counter = 0  # Reset counter
+                        
+                        # Try to find and debug emergency vehicles
+                        try:
+                            vehicles = traci.vehicle.getIDList()
+                            emergency_vehicles = [v for v in vehicles if v.startswith("Emergency_")]
+                            
+                            if emergency_vehicles:
+                                print(f"Found {len(emergency_vehicles)} emergency vehicles")
+                                # Debug the first one
+                                self.scenario_manager.debug_emergency_vehicle(emergency_vehicles[0])
+                        except Exception as e:
+                            print(f"Emergency vehicle debugging error: {e}")
+
                     
                     # Update RSUs
                     for rsu in self.rsus:
